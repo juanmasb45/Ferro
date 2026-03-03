@@ -1,0 +1,28 @@
+# Archivos específicos de Android Studio / IntelliJ
+.idea/
+*.iml
+.DS_Store
+captures/
+externalNativeBuild/
+.cxx/
+local.properties
+
+# Archivos de compilación (MUY IMPORTANTE)
+**/build/
+.gradle/
+build/
+
+# Archivos de log y temporales
+*.log
+.navigation/
+
+# Configuración de dispositivos o emuladores
+*.apk
+*.ap_
+*.dex
+*.class
+
+# Secretos (si usas Google Maps o Firebase, no subas estas claves)
+# google-services.json
+# jks
+# keystore
