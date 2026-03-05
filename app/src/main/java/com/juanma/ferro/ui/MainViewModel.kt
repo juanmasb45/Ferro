@@ -99,9 +99,6 @@ class MainViewModel @Inject constructor(
         locationData.onEach { location ->
             if (location != null && lastLocation != null) {
                 val distance = location.distanceTo(lastLocation!!) / 1000.0
-                // We only update the manual PK for display and next stop logic.
-                // We REMOVE the incrementShiftDistance call from here to avoid double counting,
-                // as LocationService already handles DB updates.
                 if (_isAscending.value) _manualPK.value += distance else _manualPK.value -= distance
             }
             lastLocation = location
@@ -113,18 +110,21 @@ class MainViewModel @Inject constructor(
             val stations = points.filter { it.type == PointType.STATION }
             val limitations = points.filter { it.type == PointType.LIMITATION }
 
-            val nextSt = if (ascending) stations.filter { it.kilometerPoint > pk }.minByOrNull { it.kilometerPoint }
-            else stations.filter { it.kilometerPoint < pk }.maxByOrNull { it.kilometerPoint }
+            // Buscar la próxima estación (o la actual si estamos en ella)
+            val nextSt = if (ascending) stations.filter { it.kilometerPoint >= pk }.minByOrNull { it.kilometerPoint }
+            else stations.filter { it.kilometerPoint <= pk }.maxByOrNull { it.kilometerPoint }
             _nextStation.value = nextSt
 
+            // Buscar la próxima limitación
             val nextLimit = if (ascending) limitations.filter { it.kilometerPoint > pk }.minByOrNull { it.kilometerPoint }
             else limitations.filter { it.kilometerPoint < pk }.maxByOrNull { it.kilometerPoint }
             _nextLimitation.value = nextLimit
 
+            // Limitación activa
             val active = limitations.find { pk >= minOf(it.kilometerPoint, it.endKm ?: it.kilometerPoint) && pk <= maxOf(it.kilometerPoint, it.endKm ?: it.kilometerPoint) }
             _activeLimitation.value = active
 
-            // Alerts for limitations (2.0km as requested)
+            // Alertas de limitaciones a 2.0 km
             nextLimit?.let {
                 val distance = abs(it.kilometerPoint - pk)
                 if (distance <= 2.05 && distance >= 1.95 && !announcedLimitIds.contains(it.id)) {
@@ -137,14 +137,15 @@ class MainViewModel @Inject constructor(
                 }
             }
 
+            // Registro automático de paso por estación
             stations.forEach { station ->
                 if (abs(station.kilometerPoint - pk) < 0.1 && !visitedPointIds.contains(station.id)) {
                     recordStationVisit(station)
                 }
             }
 
-            val distanceToStation = nextSt?.let { abs(it.kilometerPoint - pk) } ?: Double.MAX_VALUE
-            if (distanceToStation <= 1.0) {
+            // Mostrar estado del horario siempre que haya una estación próxima (desde el principio)
+            if (nextSt != null) {
                 updateScheduleStatus(nextSt)
             } else {
                 _scheduleStatus.value = null
