@@ -42,6 +42,7 @@ data class WorkShiftEntity(
     val startTime: Long,
     val endTime: Long? = null,
     val totalKilometers: Double = 0.0,
+    val currentPK: Double = 0.0,
     val trainNumber: String = "",
     val routeId: Long? = null,
     val notes: String = ""
@@ -64,6 +65,17 @@ data class StationVisitEntity(
     val routePointId: Long,
     val actualTime: Long,
     val delayMinutes: Long
+)
+
+@Entity(tableName = "track_logs")
+data class TrackLogEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val shiftId: Long,
+    val timestamp: Long,
+    val latitude: Double,
+    val longitude: Double,
+    val kilometerPoint: Double,
+    val speed: Float
 )
 
 @Serializable

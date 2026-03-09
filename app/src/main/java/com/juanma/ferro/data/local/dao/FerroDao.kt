@@ -39,6 +39,12 @@ interface FerroDao {
     @Query("UPDATE work_shifts SET totalKilometers = totalKilometers + :distance WHERE id = :shiftId")
     suspend fun incrementShiftDistance(shiftId: Long, distance: Double)
 
+    @Query("UPDATE work_shifts SET totalKilometers = totalKilometers + :distance, currentPK = currentPK + :distanceIncrement WHERE id = :shiftId")
+    suspend fun updateShiftProgress(shiftId: Long, distance: Double, distanceIncrement: Double)
+
+    @Query("UPDATE work_shifts SET currentPK = :pk WHERE id = :shiftId")
+    suspend fun updateShiftPK(shiftId: Long, pk: Double)
+
     @Query("SELECT * FROM work_shifts WHERE endTime IS NULL ORDER BY startTime DESC LIMIT 1")
     fun getActiveWorkShift(): Flow<WorkShiftEntity?>
 
@@ -59,4 +65,10 @@ interface FerroDao {
 
     @Query("SELECT * FROM station_visits WHERE shiftId = :shiftId")
     fun getVisitsForShift(shiftId: Long): Flow<List<StationVisitEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertTrackLog(trackLog: TrackLogEntity)
+
+    @Query("SELECT * FROM track_logs WHERE shiftId = :shiftId ORDER BY timestamp ASC")
+    fun getTrackLogsForShift(shiftId: Long): Flow<List<TrackLogEntity>>
 }

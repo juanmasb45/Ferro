@@ -13,6 +13,7 @@ import com.google.android.gms.location.*
 import com.juanma.ferro.data.local.dao.FerroDao
 import com.juanma.ferro.data.local.entities.PointType
 import com.juanma.ferro.data.local.entities.StationVisitEntity
+import com.juanma.ferro.data.local.entities.TrackLogEntity
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -32,6 +33,7 @@ class LocationService : Service() {
     private lateinit var locationCallback: LocationCallback
 
     private var lastLocation: Location? = null
+    private var lastLogLocation: Location? = null
     private val visitedPointIds = mutableSetOf<Long>()
 
     companion object {
@@ -62,21 +64,59 @@ class LocationService : Service() {
         serviceScope.launch {
             val activeShift = ferroDao.getActiveWorkShift().first() ?: return@launch
             
-            // 1. Calcular y guardar distancia
+            // 1. Calcular y actualizar progreso (distancia y PK)
+            var distanceIncrement = 0.0
             if (lastLocation != null) {
-                val distance = location.distanceTo(lastLocation!!) / 1000.0
-                if (distance > 0.001) {
-                    ferroDao.incrementShiftDistance(activeShift.id, distance)
+                distanceIncrement = location.distanceTo(lastLocation!!) / 1000.0
+                if (distanceIncrement > 0.001) {
+                    // Actualizamos el total de kilómetros y el PK actual en la DB
+                    ferroDao.updateShiftProgress(activeShift.id, distanceIncrement, distanceIncrement)
                 }
             }
             lastLocation = location
 
-            // 2. Detectar estaciones (si el PK actual está cerca de una estación del itinerario)
+            // 2. Grabar Log de Trayecto (cada 500 metros para no saturar, pero ser precisos)
+            if (lastLogLocation == null || location.distanceTo(lastLogLocation!!) >= 500) {
+                val updatedShift = ferroDao.getActiveWorkShift().first()
+                ferroDao.insertTrackLog(
+                    TrackLogEntity(
+                        shiftId = activeShift.id,
+                        timestamp = System.currentTimeMillis(),
+                        latitude = location.latitude,
+                        longitude = location.longitude,
+                        kilometerPoint = updatedShift?.currentPK ?: activeShift.currentPK,
+                        speed = location.speed * 3.6f // Convertir m/s a km/h
+                    )
+                )
+                lastLogLocation = location
+            }
+
+            // 3. Detección automática de Estaciones/PDIs por proximidad GPS
             activeShift.routeId?.let { routeId ->
                 val points = ferroDao.getPointsForRoute(routeId).first()
-                val currentPK = 0.0 // Aquí deberías vincular con el PK del ViewModel si es necesario, 
-                                   // pero por ahora el servicio registra por proximidad GPS si tuvieras coordenadas.
-                                   // Como usas PK manual, el servicio confía en el incremento.
+                points.forEach { point ->
+                    if (point.id !in visitedPointIds && point.latitude != 0.0) {
+                        val pointLoc = Location("").apply {
+                            latitude = point.latitude
+                            longitude = point.longitude
+                        }
+                        
+                        if (location.distanceTo(pointLoc) < 200) { // Radio de 200 metros
+                            visitedPointIds.add(point.id)
+                            // Si es estación, podrías registrar la visita automáticamente
+                            if (point.type == PointType.STATION) {
+                                ferroDao.insertStationVisit(
+                                    StationVisitEntity(
+                                        shiftId = activeShift.id,
+                                        routePointId = point.id,
+                                        actualTime = System.currentTimeMillis(),
+                                        delayMinutes = 0 // Cálculo opcional comparando con it.arrivalTime
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
     }
