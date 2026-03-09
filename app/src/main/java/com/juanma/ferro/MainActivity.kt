@@ -65,6 +65,10 @@ import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
+import java.time.Instant
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import java.util.*
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -283,7 +287,7 @@ fun FerroDashboard(viewModel: MainViewModel, onNavigateToRouteDetail: () -> Unit
             CenterAlignedTopAppBar(
                 title = { 
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("FERRO - CDMX: $mexicoTime", style = MaterialTheme.typography.titleMedium, color = Color.White)
+                        Text("FERRO - CDMX: $mexicoTime", style = MaterialTheme.typography.titleLarge, color = Color.White)
                         activeRoute?.let { Text("Marcha: ${it.trainNumber}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) }
                     }
                 },
@@ -898,7 +902,9 @@ fun EditRoutePointsScreen(viewModel: MainViewModel, routeId: Long, onBack: () ->
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RouteSheetScreen(viewModel: MainViewModel, onBack: () -> Unit) {
-    val points by viewModel.currentRoutePoints.collectAsState()
+    val points by viewModel.currentRouteProgress.collectAsState()
+    val zoneId = ZoneId.of("America/Mexico_City")
+    val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 
     Scaffold(
         topBar = {
@@ -910,41 +916,70 @@ fun RouteSheetScreen(viewModel: MainViewModel, onBack: () -> Unit) {
         }
     ) { padding ->
         LazyColumn(Modifier.padding(padding).fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-            itemsIndexed(points) { index, point ->
-                val scheduleText = when {
-                    index == 0 && point.type == PointType.STATION -> "Salida: ${point.departureTime ?: "--:--"}"
-                    index == points.size - 1 && point.type == PointType.STATION -> "Llegada: ${point.arrivalTime ?: "--:--"}"
-                    point.type == PointType.STATION -> {
+            itemsIndexed(points) { index, progress ->
+                val point = progress.point
+                val visit = progress.visit
+                
+                val theoreticalTime = when {
+                    index == 0 -> "Salida: ${point.departureTime ?: "--:--"}"
+                    index == points.size - 1 -> "Llegada: ${point.arrivalTime ?: "--:--"}"
+                    else -> {
                         val arr = point.arrivalTime
                         val dep = point.departureTime
                         when {
                             !arr.isNullOrBlank() && !dep.isNullOrBlank() -> "Arr: $arr - Dep: $dep"
-                            !arr.isNullOrBlank() -> "Llegada: $arr"
-                            !dep.isNullOrBlank() -> "Salida: $dep"
+                            !arr.isNullOrBlank() -> "Arr: $arr"
+                            !dep.isNullOrBlank() -> "Dep: $dep"
                             else -> "--:--"
                         }
                     }
-                    else -> ""
                 }
 
+                val actualTime = visit?.let {
+                    val time = ZonedDateTime.ofInstant(Instant.ofEpochMilli(it.actualTime), zoneId).format(timeFormatter)
+                    val delay = if (it.delayMinutes != 0L) {
+                        " (${if(it.delayMinutes > 0) "+" else ""}${it.delayMinutes})"
+                    } else ""
+                    "REAL: $time$delay"
+                } ?: ""
+
                 ListItem(
-                    headlineContent = { Text(point.name, fontWeight = FontWeight.Bold, color = Color.White) },
-                    supportingContent = { 
-                        val pkText = if (point.type == PointType.LIMITATION) {
-                            "PK: ${point.kilometerPoint} al ${point.endKm ?: "--"}"
-                        } else {
-                            "PK: ${point.kilometerPoint}"
+                    headlineContent = { 
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(point.name, fontWeight = FontWeight.Bold, color = Color.White)
+                            if (visit != null) {
+                                Spacer(Modifier.width(8.dp))
+                                Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF4CAF50), modifier = Modifier.size(16.dp))
+                            }
                         }
-                        Text("$pkText | ${if(point.type == PointType.STATION) "Estación" else "Limitación"}", color = Color.LightGray) 
+                    },
+                    supportingContent = { 
+                        Column {
+                            val pkText = if (point.type == PointType.LIMITATION) {
+                                "PK: ${point.kilometerPoint} al ${point.endKm ?: "--"}"
+                            } else {
+                                "PK: ${point.kilometerPoint}"
+                            }
+                            Text("$pkText | ${if(point.type == PointType.STATION) "Estación" else "Limitación"}", color = Color.LightGray)
+                            if (point.type == PointType.STATION) {
+                                Text("Teórico: $theoreticalTime", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
                     },
                     trailingContent = {
-                        if (point.type == PointType.STATION) {
-                            Text(scheduleText, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                        } else {
-                            Text("${point.speedLimit} km/h", color = Color.Yellow)
+                        Column(horizontalAlignment = Alignment.End) {
+                            if (point.type == PointType.STATION) {
+                                if (actualTime.isNotEmpty()) {
+                                    Text(actualTime, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                } else {
+                                    Text(theoreticalTime.split(": ").last(), color = Color.DarkGray)
+                                }
+                            } else {
+                                Text("${point.speedLimit} km/h", color = Color.Yellow)
+                            }
                         }
                     },
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                    colors = ListItemDefaults.colors(containerColor = if (visit != null) Color.White.copy(alpha = 0.05f) else Color.Transparent)
                 )
                 HorizontalDivider(color = Color.DarkGray, thickness = 0.5.dp)
             }
