@@ -11,13 +11,20 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.time.Instant
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
+import java.util.Locale
 import javax.inject.Inject
 import kotlin.math.abs
+
+data class PointProgress(
+    val point: RoutePointEntity,
+    val visit: StationVisitEntity?
+)
 
 @HiltViewModel
 class MainViewModel @Inject constructor(
@@ -44,7 +51,7 @@ class MainViewModel @Inject constructor(
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     val currentRoutePoints = _selectedRouteId.flatMapLatest { id ->
-        if (id != null) ferroDao.getPointsForRoute(id) else flowOf(emptyList())
+        if (id != null) ferroDao.getPointsForRoute(id).map { it.sortedBy { p -> p.order } } else flowOf(emptyList())
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val allRoutes = ferroDao.getAllRoutes()
@@ -56,8 +63,17 @@ class MainViewModel @Inject constructor(
     val currentWorkShift = ferroDao.getActiveWorkShift()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
-    val allStations = ferroDao.getAllStations()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val activeShiftVisits = currentWorkShift.flatMapLatest { shift ->
+        if (shift != null) ferroDao.getVisitsForShift(shift.id) else flowOf(emptyList())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val currentRouteProgress = combine(currentRoutePoints, activeShiftVisits) { points, visits ->
+        points.map { point ->
+            val visit = visits.find { it.routePointId == point.id }
+            PointProgress(point, visit)
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val visitedPointIds = mutableSetOf<Long>()
     private val announcedLimitIds = mutableSetOf<Long>()
@@ -76,6 +92,15 @@ class MainViewModel @Inject constructor(
 
     private val _activeLimitation = MutableStateFlow<RoutePointEntity?>(null)
     val activeLimitation = _activeLimitation.asStateFlow()
+
+    val currentLimit = combine(_selectedRouteId, allRoutes, _activeLimitation) { routeId, routes, activeLim ->
+        val route = routes.find { it.id == routeId }
+        activeLim?.speedLimit ?: route?.maxSpeed ?: 80
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 80)
+
+    val isOverSpeed = combine(currentSpeed, currentLimit) { speed, limit ->
+        speed > limit
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     init {
         updateClock()
@@ -100,34 +125,56 @@ class MainViewModel @Inject constructor(
             if (location != null && lastLocation != null) {
                 val distance = location.distanceTo(lastLocation!!) / 1000.0
                 if (_isAscending.value) _manualPK.value += distance else _manualPK.value -= distance
+                updateTotalKilometers(distance)
             }
             lastLocation = location
         }.launchIn(viewModelScope)
     }
 
-    private fun observeProximityAndSchedule() {
-        combine(currentPK, currentRoutePoints, isAscending) { pk, points, ascending ->
-            val stations = points.filter { it.type == PointType.STATION }
-            val limitations = points.filter { it.type == PointType.LIMITATION }
+    private fun updateTotalKilometers(distance: Double) {
+        viewModelScope.launch {
+            val activeShift = ferroDao.getActiveWorkShift().firstOrNull()
+            activeShift?.id?.let { shiftId ->
+                ferroDao.incrementShiftDistance(shiftId, distance)
+            }
+        }
+    }
 
-            // Buscar la próxima estación (o la actual si estamos en ella)
-            val nextSt = if (ascending) stations.filter { it.kilometerPoint >= pk }.minByOrNull { it.kilometerPoint }
-            else stations.filter { it.kilometerPoint <= pk }.maxByOrNull { it.kilometerPoint }
+    private fun observeProximityAndSchedule() {
+        combine(currentPK, currentRoutePoints, _isAscending) { pk, points, isAsc ->
+            if (points.isEmpty()) return@combine
+
+            points.forEach { point ->
+                if (abs(point.kilometerPoint - pk) < 0.2 && !visitedPointIds.contains(point.id)) {
+                    visitedPointIds.add(point.id)
+                    if (point.type == PointType.STATION) {
+                        recordStationVisit(point)
+                    }
+                }
+            }
+
+            val upcomingPoints = if (isAsc) {
+                points.filter { it.kilometerPoint > pk + 0.1 }.sortedBy { it.kilometerPoint }
+            } else {
+                points.filter { it.kilometerPoint < pk - 0.1 }.sortedByDescending { it.kilometerPoint }
+            }
+
+            val nextSt = upcomingPoints.firstOrNull { it.type == PointType.STATION }
             _nextStation.value = nextSt
 
-            // Buscar la próxima limitación
-            val nextLimit = if (ascending) limitations.filter { it.kilometerPoint > pk }.minByOrNull { it.kilometerPoint }
-            else limitations.filter { it.kilometerPoint < pk }.maxByOrNull { it.kilometerPoint }
+            val nextLimit = upcomingPoints.firstOrNull { it.type == PointType.LIMITATION }
             _nextLimitation.value = nextLimit
 
-            // Limitación activa
-            val active = limitations.find { pk >= minOf(it.kilometerPoint, it.endKm ?: it.kilometerPoint) && pk <= maxOf(it.kilometerPoint, it.endKm ?: it.kilometerPoint) }
+            val active = points.filter { it.type == PointType.LIMITATION }.find { 
+                val start = minOf(it.kilometerPoint, it.endKm ?: it.kilometerPoint)
+                val end = maxOf(it.kilometerPoint, it.endKm ?: it.kilometerPoint)
+                pk >= (start - 0.02) && pk <= (end + 0.02) 
+            }
             _activeLimitation.value = active
 
-            // Alertas de limitaciones a 2.0 km
             nextLimit?.let {
                 val distance = abs(it.kilometerPoint - pk)
-                if (distance <= 2.05 && distance >= 1.95 && !announcedLimitIds.contains(it.id)) {
+                if (distance <= 2.05 && distance >= 1.85 && !announcedLimitIds.contains(it.id)) {
                     announcedLimitIds.add(it.id)
                     _proximityAlert.value = "Atención: Limitación ${it.name} a dos kilómetros. Velocidad máxima ${it.speedLimit} kilómetros por hora"
                     viewModelScope.launch {
@@ -137,14 +184,6 @@ class MainViewModel @Inject constructor(
                 }
             }
 
-            // Registro automático de paso por estación
-            stations.forEach { station ->
-                if (abs(station.kilometerPoint - pk) < 0.1 && !visitedPointIds.contains(station.id)) {
-                    recordStationVisit(station)
-                }
-            }
-
-            // Mostrar estado del horario siempre que haya una estación próxima (desde el principio)
             if (nextSt != null) {
                 updateScheduleStatus(nextSt)
             } else {
@@ -155,15 +194,19 @@ class MainViewModel @Inject constructor(
 
     private fun recordStationVisit(point: RoutePointEntity) {
         viewModelScope.launch {
-            val activeShift = ferroDao.getActiveWorkShift().first()
+            val activeShift = ferroDao.getActiveWorkShift().firstOrNull()
             activeShift?.id?.let { shiftId ->
-                visitedPointIds.add(point.id)
                 val now = LocalTime.now(ZoneId.of("America/Mexico_City"))
                 var delayMins = 0L
-                try {
-                    val scheduled = LocalTime.parse(point.arrivalTime)
-                    delayMins = ChronoUnit.MINUTES.between(scheduled, now)
-                } catch (e: Exception) {}
+                
+                if (!point.arrivalTime.isNullOrBlank() || !point.departureTime.isNullOrBlank()) {
+                    try {
+                        val scheduled = parseLocalTime(point.arrivalTime ?: point.departureTime)
+                        if (scheduled != null) {
+                            delayMins = ChronoUnit.MINUTES.between(scheduled, now)
+                        }
+                    } catch (e: Exception) {}
+                }
 
                 ferroDao.insertStationVisit(StationVisitEntity(
                     shiftId = shiftId,
@@ -175,11 +218,25 @@ class MainViewModel @Inject constructor(
         }
     }
 
+    private fun parseLocalTime(timeStr: String?): LocalTime? {
+        if (timeStr.isNullOrBlank()) return null
+        return try {
+            val parts = timeStr.split(":")
+            if (parts.size >= 2) {
+                LocalTime.of(parts[0].toInt(), parts[1].toInt())
+            } else null
+        } catch (e: Exception) { null }
+    }
+
     private fun updateScheduleStatus(nextStation: RoutePointEntity?) {
-        val scheduledTimeStr = nextStation?.arrivalTime ?: return
+        val scheduled = parseLocalTime(nextStation?.arrivalTime ?: nextStation?.departureTime)
+        if (scheduled == null) {
+            _scheduleStatus.value = "PASO: ${nextStation?.name ?: ""}"
+            return
+        }
+
         try {
             val now = LocalTime.now(ZoneId.of("America/Mexico_City"))
-            val scheduled = LocalTime.parse(scheduledTimeStr)
             val diffMinutes = ChronoUnit.MINUTES.between(scheduled, now)
             _scheduleStatus.value = when {
                 diffMinutes > 2 -> "RETRASO: $diffMinutes min"
@@ -206,7 +263,7 @@ class MainViewModel @Inject constructor(
 
     fun finishWorkShift(notes: String) {
         viewModelScope.launch {
-            val activeShift = ferroDao.getActiveWorkShift().first()
+            val activeShift = ferroDao.getActiveWorkShift().firstOrNull()
             activeShift?.let { shift ->
                 ferroDao.insertWorkShift(shift.copy(
                     endTime = System.currentTimeMillis(),
@@ -224,7 +281,7 @@ class MainViewModel @Inject constructor(
 
     fun addIncident(type: String) {
         viewModelScope.launch {
-            val activeShift = ferroDao.getActiveWorkShift().first()
+            val activeShift = ferroDao.getActiveWorkShift().firstOrNull()
             activeShift?.id?.let { shiftId ->
                 val incident = IncidentEntity(
                     shiftId = shiftId,
@@ -276,35 +333,101 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun insertStation(station: StationEntity) {
+    fun reorderPoints(routeId: Long, newOrderedPoints: List<RoutePointEntity>) {
         viewModelScope.launch {
-            ferroDao.insertStation(station)
+            newOrderedPoints.forEachIndexed { index, point ->
+                ferroDao.insertRoutePoint(point.copy(order = index))
+            }
         }
     }
 
-    fun deleteStation(station: StationEntity) {
-        viewModelScope.launch {
-            ferroDao.deleteStation(station)
+    suspend fun getShiftSummaryText(shift: WorkShiftEntity): String {
+        val route = shift.routeId?.let { ferroDao.getRouteById(it) }
+        val formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm")
+        val zone = ZoneId.of("America/Mexico_City")
+        val start = ZonedDateTime.ofInstant(Instant.ofEpochMilli(shift.startTime), zone).format(formatter)
+        val end = shift.endTime?.let { ZonedDateTime.ofInstant(Instant.ofEpochMilli(it), zone).format(formatter) } ?: "En curso"
+
+        val duration = if (shift.endTime != null) {
+            val mins = (shift.endTime - shift.startTime) / 60000
+            "${mins / 60}h ${mins % 60}m"
+        } else "---"
+
+        val visits = ferroDao.getVisitsForShift(shift.id).first()
+        val allPoints = route?.id?.let { ferroDao.getPointsForRoute(it).first() } ?: emptyList()
+        val visitFormatter = DateTimeFormatter.ofPattern("HH:mm")
+
+        val visitsText = if (visits.isNotEmpty()) {
+            val details = visits.sortedBy { it.actualTime }.joinToString("\n            ") { visit ->
+                val point = allPoints.find { it.id == visit.routePointId }
+                val theoretical = point?.arrivalTime ?: point?.departureTime ?: "--:--"
+                val actual = ZonedDateTime.ofInstant(Instant.ofEpochMilli(visit.actualTime), zone).format(visitFormatter)
+                val typeLabel = if (point?.arrivalTime == null && point?.departureTime == null) "PASO" else "PARADA"
+                val delayLabel = if (visit.delayMinutes != 0L) " (${if(visit.delayMinutes > 0) "+" else ""}${visit.delayMinutes} min)" else ""
+                "- $theoretical -> REAL: $actual | ${point?.name ?: "---"} ($typeLabel)$delayLabel"
+            }
+            "\n\n            Itinerario Real vs Teórico:\n            $details"
+        } else ""
+
+        val incidents = ferroDao.getIncidentsForShift(shift.id).first()
+        val incidentsText = if (incidents.isNotEmpty()) {
+            val incidentFormatter = DateTimeFormatter.ofPattern("HH:mm")
+            val incidentDetails = incidents.joinToString("\n            ") { incident ->
+                val time = ZonedDateTime.ofInstant(Instant.ofEpochMilli(incident.timestamp), zone).format(incidentFormatter)
+                "- ${incident.type} a las $time (PK ${String.format(Locale.getDefault(), "%.3f", incident.pk)})"
+            }
+            "\n\n            Incidencias Registradas:\n            $incidentDetails"
+        } else {
+            ""
         }
+
+        return """
+            🚂 RESUMEN DE JORNADA FERRO
+            ---------------------------
+            Ruta: ${route?.name ?: "N/A"}
+            Tren: ${shift.trainNumber}
+            Fecha Inicio: $start
+            Fecha Fin: $end
+            Duración: $duration
+            Distancia: ${String.format(Locale.getDefault(), "%.2f", shift.totalKilometers)} km
+            $visitsText
+            $incidentsText
+            
+            Notas: ${shift.notes.ifBlank { "Sin observaciones" }}
+            
+            Enviado desde Ferro App
+        """.trimIndent()
     }
 
-    suspend fun getRouteJson(routeId: Long): String? {
-        val route = ferroDao.getRouteById(routeId) ?: return null
-        val points = ferroDao.getPointsForRoute(routeId).first()
-        val container = RouteExportContainer(route, points)
-        return Json.encodeToString(container)
+    suspend fun getAllRoutesExportJson(): String {
+        val routes = ferroDao.getAllRoutes().first()
+        val exportList = routes.map { route ->
+            val points = ferroDao.getPointsForRoute(route.id).first()
+            RouteExportContainer(route, points)
+        }
+        return Json.encodeToString(exportList)
     }
 
-    fun importRouteFromJson(json: String) {
+    fun importRoutesFromJson(json: String) {
         viewModelScope.launch {
             try {
-                val container = Json.decodeFromString<RouteExportContainer>(json)
-                val newRouteId = ferroDao.insertRoute(container.route.copy(id = 0))
-                container.points.forEach { point ->
-                    ferroDao.insertRoutePoint(point.copy(id = 0, routeId = newRouteId))
+                val list = Json.decodeFromString<List<RouteExportContainer>>(json)
+                list.forEach { container ->
+                    val newRouteId = ferroDao.insertRoute(container.route.copy(id = 0))
+                    container.points.forEach { point ->
+                        ferroDao.insertRoutePoint(point.copy(id = 0, routeId = newRouteId))
+                    }
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
+                try {
+                    val container = Json.decodeFromString<RouteExportContainer>(json)
+                    val newRouteId = ferroDao.insertRoute(container.route.copy(id = 0))
+                    container.points.forEach { point ->
+                        ferroDao.insertRoutePoint(point.copy(id = 0, routeId = newRouteId))
+                    }
+                } catch (e2: Exception) {
+                    e2.printStackTrace()
+                }
             }
         }
     }

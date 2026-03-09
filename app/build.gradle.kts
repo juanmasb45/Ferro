@@ -2,8 +2,8 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.ksp) // KSP debe ir ANTES de Hilt para evitar conflictos de classloader
     alias(libs.plugins.hilt)
-    alias(libs.plugins.ksp)
     alias(libs.plugins.kotlin.serialization)
 }
 
@@ -34,9 +34,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    
     kotlinOptions {
         jvmTarget = "17"
     }
+
     buildFeatures {
         compose = true
     }
@@ -70,6 +72,7 @@ dependencies {
     implementation(libs.play.services.location)
 
     // Serialization
+    // Corregido: se accede con puntos para evitar que el guion se interprete como una resta
     implementation(libs.kotlinx.serialization.json)
 
     testImplementation(libs.junit)

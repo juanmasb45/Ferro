@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.media.ToneGenerator
+import android.net.Uri
 import android.os.*
 import android.speech.tts.TextToSpeech
 import androidx.activity.ComponentActivity
@@ -13,12 +14,15 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -29,17 +33,23 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavDestination.Companion.hierarchy
@@ -52,15 +62,16 @@ import com.juanma.ferro.service.LocationService
 import com.juanma.ferro.ui.MainViewModel
 import com.juanma.ferro.ui.theme.FerroTheme
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 sealed class Screen(val route: String, val label: String, val icon: ImageVector) {
     object Dashboard : Screen("dashboard", "Dashboard", Icons.Default.Home)
     object Routes : Screen("routes", "Rutas", Icons.AutoMirrored.Filled.List)
-    object Stations : Screen("stations", "Estaciones", Icons.Default.Place)
     object Settings : Screen("settings", "Cuaderno", Icons.Default.Book)
 }
 
@@ -102,9 +113,25 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 fun FerroAppNavigation(viewModel: MainViewModel = hiltViewModel(), onSpeak: (String) -> Unit) {
     val navController = rememberNavController()
     val alert by viewModel.proximityAlert.collectAsState()
+    val isOverSpeed by viewModel.isOverSpeed.collectAsState()
 
     LaunchedEffect(alert) {
         alert?.let { onSpeak(it) }
+    }
+
+    LaunchedEffect(isOverSpeed) {
+        if (isOverSpeed) {
+            val toneGenerator = ToneGenerator(AudioManager.STREAM_ALARM, 100)
+            try {
+                while (true) {
+                    toneGenerator.startTone(ToneGenerator.TONE_CDMA_PIP, 200)
+                    delay(1000)
+                }
+            } catch (e: Exception) {
+            } finally {
+                toneGenerator.release()
+            }
+        }
     }
 
     Scaffold(
@@ -115,7 +142,7 @@ fun FerroAppNavigation(viewModel: MainViewModel = hiltViewModel(), onSpeak: (Str
             ) {
                 val navBackStackEntry by navController.currentBackStackEntryAsState()
                 val currentDestination = navBackStackEntry?.destination
-                val items = listOf(Screen.Dashboard, Screen.Routes, Screen.Stations, Screen.Settings)
+                val items = listOf(Screen.Dashboard, Screen.Routes, Screen.Settings)
                 
                 items.forEach { screen ->
                     NavigationBarItem(
@@ -150,21 +177,18 @@ fun FerroAppNavigation(viewModel: MainViewModel = hiltViewModel(), onSpeak: (Str
             composable(Screen.Routes.route) {
                 RoutesListScreen(
                     viewModel = viewModel,
-                    onNavigateToEditRoute = { routeId -> navController.navigate("edit_route/$routeId") }
+                    onNavigateToEditPoints = { routeId -> navController.navigate("edit_route_points/$routeId") }
                 )
-            }
-            composable(Screen.Stations.route) {
-                StationsManagerScreen(viewModel = viewModel)
             }
             composable(Screen.Settings.route) {
                 SettingsScreen(viewModel = viewModel)
             }
             composable(
-                "edit_route/{routeId}",
+                "edit_route_points/{routeId}",
                 arguments = listOf(navArgument("routeId") { type = NavType.LongType })
             ) { backStackEntry ->
                 val routeId = backStackEntry.arguments?.getLong("routeId") ?: 0L
-                EditRouteScreen(
+                EditRoutePointsScreen(
                     viewModel = viewModel,
                     routeId = routeId,
                     onBack = { navController.popBackStack() }
@@ -231,20 +255,28 @@ fun FerroDashboard(viewModel: MainViewModel, onNavigateToRouteDetail: () -> Unit
     val speed by viewModel.currentSpeed.collectAsState()
     val pk by viewModel.currentPK.collectAsState()
     val isAscending by viewModel.isAscending.collectAsState()
-    val nextStation by viewModel.nextStation.collectAsState()
-    val nextLimitation by viewModel.nextLimitation.collectAsState()
     val alert by viewModel.proximityAlert.collectAsState()
     val scheduleStatus by viewModel.scheduleStatus.collectAsState()
-    val activeLimitation by viewModel.activeLimitation.collectAsState()
     val selectedRouteId by viewModel.selectedRouteId.collectAsState()
     val routes by viewModel.allRoutes.collectAsState()
+    val currentLimit by viewModel.currentLimit.collectAsState()
+    val isOverSpeed by viewModel.isOverSpeed.collectAsState()
     
     val activeRoute = routes.find { it.id == selectedRouteId }
 
     var showEditPK by remember { mutableStateOf(false) }
     var showIncidentDialog by remember { mutableStateOf(false) }
     var showFinishDialog by remember { mutableStateOf(false) }
-    val context = LocalContext.current
+
+    val dialogColors = TextFieldDefaults.colors(
+        focusedTextColor = Color.White,
+        unfocusedTextColor = Color.White,
+        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+        focusedLabelColor = MaterialTheme.colorScheme.primary,
+        unfocusedLabelColor = Color.LightGray,
+        cursorColor = MaterialTheme.colorScheme.primary
+    )
 
     Scaffold(
         topBar = {
@@ -302,14 +334,14 @@ fun FerroDashboard(viewModel: MainViewModel, onNavigateToRouteDetail: () -> Unit
                     FilterChip(
                         selected = isAscending,
                         onClick = { viewModel.setDirection(true) },
-                        label = { Text("Ascendente") },
+                        label = { Text("Ascendente", color = Color.White) },
                         leadingIcon = if (isAscending) { { Icon(Icons.Default.ArrowUpward, null, Modifier.size(16.dp)) } } else null
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     FilterChip(
                         selected = !isAscending,
                         onClick = { viewModel.setDirection(false) },
-                        label = { Text("Descendente") },
+                        label = { Text("Descendente", color = Color.White) },
                         leadingIcon = if (!isAscending) { { Icon(Icons.Default.ArrowDownward, null, Modifier.size(16.dp)) } } else null
                     )
                 }
@@ -317,10 +349,8 @@ fun FerroDashboard(viewModel: MainViewModel, onNavigateToRouteDetail: () -> Unit
                 alert?.let { Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFFF9800)), modifier = Modifier.fillMaxWidth()) { Text(it, Modifier.padding(12.dp).align(Alignment.CenterHorizontally), fontWeight = FontWeight.Bold, color = Color.White) } }
                 
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("$speed", fontSize = 120.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                    Text("km/h", fontSize = 24.sp, color = Color.White)
-                    val currentLimit = activeLimitation?.speedLimit ?: activeRoute?.maxSpeed ?: 80
-                    val isOverSpeed = speed > currentLimit
+                    Text("$speed", fontSize = 120.sp, fontWeight = FontWeight.Bold, color = if(isOverSpeed) Color.Red else Color.White)
+                    Text("km/h", fontSize = 24.sp, color = if(isOverSpeed) Color.Red else Color.White)
                     Text("LÍMITE: $currentLimit km/h", color = if(isOverSpeed) Color.Red else MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                     if (isOverSpeed) Text("¡SOBREVELOCIDAD!", color = Color.Red, fontWeight = FontWeight.ExtraBold)
                 }
@@ -334,620 +364,534 @@ fun FerroDashboard(viewModel: MainViewModel, onNavigateToRouteDetail: () -> Unit
                 Card(Modifier.fillMaxWidth().clickable { showEditPK = true }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                     Column(Modifier.padding(16.dp).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("PK ACTUAL (Toca para ajustar)", style = MaterialTheme.typography.labelLarge, color = Color.White)
-                        Text(String.format(Locale.getDefault(), "km %.3f", pk), fontSize = 42.sp, fontWeight = FontWeight.Medium, color = Color.White)
+                        Text(String.format(Locale.getDefault(), "km %.3f", pk), fontSize = 48.sp, fontWeight = FontWeight.Bold, color = Color.White)
                     }
                 }
 
-                nextLimitation?.let { limit ->
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFF9800)),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
+                Spacer(Modifier.height(8.dp))
+                
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Card(Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                         Column(Modifier.padding(16.dp)) {
-                            Text("PRÓXIMA LIMITACIÓN: ${limit.name}", fontWeight = FontWeight.Bold, color = Color.White)
-                            Text("Distancia: ${String.format(Locale.getDefault(), "%.1f", abs(limit.kilometerPoint - pk))} km", color = Color.White)
-                            Text("Límite: ${limit.speedLimit} km/h", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                            Text("PRÓXIMA ESTACIÓN", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                            Text(viewModel.nextStation.collectAsState().value?.name ?: "---", fontWeight = FontWeight.Bold, color = Color.White)
+                            Text("PK: ${viewModel.nextStation.collectAsState().value?.kilometerPoint ?: "---"}", style = MaterialTheme.typography.bodySmall, color = Color.White)
                         }
                     }
-                }
-
-                nextStation?.let { Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-                    Row(Modifier.padding(16.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Column { 
-                            Text("PRÓXIMA PARADA", style = MaterialTheme.typography.labelSmall, color = Color.White)
-                            Text(it.name, style = MaterialTheme.typography.titleLarge, color = Color.White)
-                            Text("Entrada: ${it.arrivalTime ?: "--:--"}", style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.7f))
-                        }
-                        val distance = abs(it.kilometerPoint - pk)
-                        Text(String.format(Locale.getDefault(), "%.1f km", distance), style = MaterialTheme.typography.headlineSmall, color = Color.White)
-                    }
-                } }
-            }
-            // Espacio al final para que el FAB no tape contenido
-            Spacer(modifier = Modifier.height(80.dp))
-        }
-
-        if (showEditPK) {
-            EditPKDialog(currentPKValue = pk, onDismiss = { showEditPK = false }, onConfirm = { viewModel.setPK(it); showEditPK = false })
-        }
-
-        if (showIncidentDialog) {
-            IncidentDialog(onDismiss = { showIncidentDialog = false }, onConfirm = { viewModel.addIncident(it); triggerFeedback(context); showIncidentDialog = false })
-        }
-
-        if (showFinishDialog) {
-            FinishViajeDialog(onDismiss = { showFinishDialog = false }, onConfirm = { notes -> viewModel.finishWorkShift(notes); showFinishDialog = false })
-        }
-    }
-}
-
-@Composable
-fun FinishViajeDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
-    var notes by remember { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surface,
-        title = { Text("Finalizar Viaje", color = Color.White) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("¿Deseas guardar notas sobre este viaje?", color = Color.White.copy(0.7f))
-                TextField(
-                    value = notes,
-                    onValueChange = { notes = it },
-                    placeholder = { Text("Ej: Retraso por cruce, clima...") },
-                    modifier = Modifier.fillMaxWidth().height(100.dp)
-                )
-            }
-        },
-        confirmButton = { Button(onClick = { onConfirm(notes) }) { Text("Guardar en Cuaderno") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar", color = Color.White) } }
-    )
-}
-
-@Composable
-fun EditPKDialog(currentPKValue: Double, onDismiss: () -> Unit, onConfirm: (Double) -> Unit) {
-    var pkText by remember { mutableStateOf(currentPKValue.toString()) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surface,
-        title = { Text("Ajustar PK Actual", color = Color.White) },
-        text = { TextField(value = pkText, onValueChange = { pkText = it }, label = { Text("Nuevo Kilómetro") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)) },
-        confirmButton = { Button(onClick = { onConfirm(pkText.replace(',', '.').toDoubleOrNull() ?: currentPKValue) }) { Text("Actualizar") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar", color = Color.White) } }
-    )
-}
-
-private fun triggerFeedback(context: Context) {
-    val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
-        vibratorManager.defaultVibrator
-    } else {
-        @Suppress("DEPRECATION") context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-    }
-    
-    if (ContextCompat.checkSelfPermission(context, Manifest.permission.VIBRATE) == PackageManager.PERMISSION_GRANTED) {
-        vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 100, 100, 100), -1))
-    }
-    ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100).startTone(ToneGenerator.TONE_PROP_BEEP, 200)
-}
-
-@Composable
-fun IncidentDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
-    val types = listOf("Señal en Rojo", "Avería Técnica", "Parada No Prevista", "Cruce de Tren", "Obstrucción en Vía")
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surface,
-        title = { Text("Registrar Incidencia", color = Color.White) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                types.forEach { type ->
-                    Button(onClick = { onConfirm(type) }, modifier = Modifier.fillMaxWidth()) { Text(type) }
-                }
-            }
-        },
-        confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cerrar", color = Color.White) } }
-    )
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun RoutesListScreen(viewModel: MainViewModel, onNavigateToEditRoute: (Long) -> Unit) {
-    val routes by viewModel.allRoutes.collectAsState()
-    val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-    var showAddRoute by remember { mutableStateOf(false) }
-    var routeToDelete by remember { mutableStateOf<RouteEntity?>(null) }
-    var selectedRouteForExport by remember { mutableStateOf<RouteEntity?>(null) }
-
-    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
-        uri?.let {
-            scope.launch {
-                val json = viewModel.getRouteJson(selectedRouteForExport?.id ?: return@launch)
-                if (json != null) {
-                    context.contentResolver.openOutputStream(it)?.use { out ->
-                        out.write(json.toByteArray())
-                    }
-                }
-            }
-        }
-    }
-
-    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let {
-            scope.launch {
-                context.contentResolver.openInputStream(it)?.use { input ->
-                    val json = input.bufferedReader().readText()
-                    viewModel.importRouteFromJson(json)
-                }
-            }
-        }
-    }
-
-    Scaffold(
-        topBar = { 
-            TopAppBar(
-                title = { Text("Gestión de Rutas", color = Color.White) }, 
-                actions = {
-                    IconButton(onClick = { importLauncher.launch(arrayOf("application/json")) }) {
-                        Icon(Icons.Default.FileDownload, "Importar", tint = Color.White)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) 
-        },
-        floatingActionButton = { FloatingActionButton(onClick = { showAddRoute = true }, containerColor = MaterialTheme.colorScheme.primary) { Icon(Icons.Default.Add, null) } }
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier.padding(padding).fillMaxSize().background(MaterialTheme.colorScheme.background),
-            contentPadding = PaddingValues(bottom = 80.dp)
-        ) {
-            items(routes) { route ->
-                ListItem(
-                    headlineContent = { Text(route.name, color = Color.White) },
-                    supportingContent = { Text("Tren: ${route.trainNumber} | Máx: ${route.maxSpeed} km/h", color = Color.White.copy(alpha = 0.7f)) },
-                    trailingContent = { 
-                        Row {
-                            IconButton(onClick = { 
-                                selectedRouteForExport = route
-                                exportLauncher.launch("${route.name}.json")
-                            }) { Icon(Icons.Default.FileUpload, "Exportar", tint = Color.White) }
-                            IconButton(onClick = { viewModel.cloneRoute(route) }) { Icon(Icons.Default.Refresh, "Clonar", tint = Color.White) }
-                            IconButton(onClick = { viewModel.invertRoute(route) }) { Icon(Icons.AutoMirrored.Filled.CompareArrows, "Invertir", tint = Color.White) }
-                            IconButton(onClick = { onNavigateToEditRoute(route.id) }) { Icon(Icons.Default.Edit, null, tint = Color.White) }
-                            IconButton(onClick = { routeToDelete = route }) { Icon(Icons.Default.Delete, null, tint = Color.White) }
-                        }
-                    },
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    modifier = Modifier.clickable { viewModel.selectRoute(route.id) }
-                )
-            }
-        }
-        
-        if (showAddRoute) {
-            AddRouteDialog(onDismiss = { showAddRoute = false }, onConfirm = { name, number, speed, length ->
-                scope.launch { viewModel.ferroDao.insertRoute(RouteEntity(name = name, trainNumber = number, maxSpeed = speed, trainLength = length)) }
-                showAddRoute = false
-            })
-        }
-
-        routeToDelete?.let { route ->
-            AlertDialog(
-                onDismissRequest = { routeToDelete = null },
-                title = { Text("¿Borrar Ruta?") },
-                text = { Text("Esta acción eliminará permanentemente la ruta '${route.name}' y todas sus estaciones.") },
-                confirmButton = {
-                    Button(onClick = { viewModel.deleteRoute(route); routeToDelete = null }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) {
-                        Text("Borrar")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { routeToDelete = null }) { Text("Cancelar") }
-                }
-            )
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun StationsManagerScreen(viewModel: MainViewModel) {
-    val stations by viewModel.allStations.collectAsState()
-    var showAddStation by remember { mutableStateOf(false) }
-    var stationToDelete by remember { mutableStateOf<StationEntity?>(null) }
-    var stationToEdit by remember { mutableStateOf<StationEntity?>(null) }
-
-    Scaffold(
-        topBar = { TopAppBar(title = { Text("Base de Datos de Estaciones", color = Color.White) }, colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)) },
-        floatingActionButton = { FloatingActionButton(onClick = { showAddStation = true }, containerColor = MaterialTheme.colorScheme.primary) { Icon(Icons.Default.Add, null) } }
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier.padding(padding).fillMaxSize().background(MaterialTheme.colorScheme.background),
-            contentPadding = PaddingValues(bottom = 80.dp)
-        ) {
-            items(stations) { station ->
-                ListItem(
-                    headlineContent = { Text(station.name, color = Color.White) },
-                    supportingContent = { Text("PK: ${station.kilometerPoint}", color = Color.White.copy(alpha = 0.7f)) },
-                    trailingContent = { 
-                        Row {
-                            IconButton(onClick = { stationToEdit = station }) { Icon(Icons.Default.Edit, null, tint = Color.White) }
-                            IconButton(onClick = { stationToDelete = station }) { Icon(Icons.Default.Delete, null, tint = Color.White) }
-                        }
-                    },
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent)
-                )
-            }
-        }
-
-        if (showAddStation) {
-            AddStationDialog(onDismiss = { showAddStation = false }, onConfirm = { viewModel.insertStation(it) })
-        }
-
-        if (stationToEdit != null) {
-            AddStationDialog(editingStation = stationToEdit, onDismiss = { stationToEdit = null }, onConfirm = { viewModel.insertStation(it) })
-        }
-
-        stationToDelete?.let { station ->
-            AlertDialog(
-                onDismissRequest = { stationToDelete = null },
-                title = { Text("¿Borrar Estación?") },
-                text = { Text("Se eliminará '${station.name}' de la base de datos global.") },
-                confirmButton = {
-                    Button(onClick = { viewModel.deleteStation(station); stationToDelete = null }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) {
-                        Text("Borrar")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { stationToDelete = null }) { Text("Cancelar") }
-                }
-            )
-        }
-    }
-}
-
-@Composable
-fun AddStationDialog(editingStation: StationEntity? = null, onDismiss: () -> Unit, onConfirm: (StationEntity) -> Unit) {
-    var name by remember(editingStation) { mutableStateOf(editingStation?.name ?: "") }
-    var pk by remember(editingStation) { mutableStateOf(editingStation?.kilometerPoint?.toString() ?: "") }
-    val textFieldColors = TextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White, focusedContainerColor = Color(0xFF2C4A5E), unfocusedContainerColor = Color(0xFF2C4A5E))
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surface,
-        title = { Text(if (editingStation == null) "Nueva Estación Global" else "Editar Estación Global", color = Color.White) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextField(value = name, onValueChange = { name = it }, label = { Text("Nombre Estación") }, colors = textFieldColors)
-                TextField(value = pk, onValueChange = { pk = it }, label = { Text("PK") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), colors = textFieldColors)
-            }
-        },
-        confirmButton = { Button(onClick = { 
-            val finalPk = pk.replace(',', '.').toDoubleOrNull() ?: 0.0
-            val finalStation = editingStation?.copy(name = name, kilometerPoint = finalPk) 
-                ?: StationEntity(name = name, kilometerPoint = finalPk)
-            onConfirm(finalStation)
-            onDismiss() 
-        }) { Text("Guardar") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar", color = Color.White) } }
-    )
-}
-
-@Composable
-fun AddRouteDialog(onDismiss: () -> Unit, onConfirm: (String, String, Int, Int) -> Unit) {
-    var name by remember { mutableStateOf("") }
-    var number by remember { mutableStateOf("") }
-    var speed by remember { mutableStateOf("80") }
-    var length by remember { mutableStateOf("0") }
-
-    val textFieldColors = TextFieldDefaults.colors(
-        focusedTextColor = Color.White,
-        unfocusedTextColor = Color.White,
-        focusedContainerColor = Color(0xFF2C4A5E),
-        unfocusedContainerColor = Color(0xFF2C4A5E)
-    )
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surface,
-        title = { Text("Nueva Ruta", color = Color.White) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextField(value = name, onValueChange = { name = it }, label = { Text("Nombre Ruta") }, colors = textFieldColors)
-                TextField(value = number, onValueChange = { number = it }, label = { Text("Nº Tren") }, colors = textFieldColors)
-                TextField(value = speed, onValueChange = { speed = it }, label = { Text("V. Máxima") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), colors = textFieldColors)
-                TextField(value = length, onValueChange = { length = it }, label = { Text("Longitud (m)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), colors = textFieldColors)
-            }
-        },
-        confirmButton = { Button(onClick = { onConfirm(name, number, speed.toIntOrNull() ?: 80, length.toIntOrNull() ?: 0) }) { Text("Crear") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar", color = Color.White) } }
-    )
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun EditRouteScreen(viewModel: MainViewModel, routeId: Long, onBack: () -> Unit) {
-    val points by viewModel.ferroDao.getPointsForRoute(routeId).collectAsState(initial = emptyList())
-    val allStations by viewModel.allStations.collectAsState()
-    
-    var routeName by rememberSaveable { mutableStateOf("") }
-    var trainNumber by rememberSaveable { mutableStateOf("") }
-    var maxSpeed by rememberSaveable { mutableStateOf("") }
-    var routeEntity by remember { mutableStateOf<RouteEntity?>(null) }
-    var initialLoadDone by remember(routeId) { mutableStateOf(false) }
-
-    LaunchedEffect(routeId) {
-        if (!initialLoadDone) {
-            viewModel.ferroDao.getRouteById(routeId)?.let {
-                routeEntity = it
-                routeName = it.name
-                trainNumber = it.trainNumber
-                maxSpeed = it.maxSpeed.toString()
-                initialLoadDone = true
-            }
-        }
-    }
-
-    var showAddPoint by remember { mutableStateOf(false) }
-    var pointToEdit by remember { mutableStateOf<RoutePointEntity?>(null) }
-    val scope = rememberCoroutineScope()
-
-    Scaffold(
-        topBar = { 
-            TopAppBar(
-                title = { Text("Editar Itinerario", color = Color.White) }, 
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White) } },
-                actions = {
-                    IconButton(onClick = {
-                        routeEntity?.let {
-                            viewModel.updateRoute(it.copy(
-                                name = routeName,
-                                trainNumber = trainNumber,
-                                maxSpeed = maxSpeed.toIntOrNull() ?: 80
-                            ))
-                            onBack()
-                        }
-                    }) {
-                        Icon(Icons.Default.Save, "Guardar", tint = Color.White)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) 
-        },
-        floatingActionButton = { FloatingActionButton(onClick = { showAddPoint = true }, containerColor = MaterialTheme.colorScheme.primary) { Icon(Icons.Default.Add, null) } }
-    ) { padding ->
-        Column(modifier = Modifier.padding(padding).fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-            val textFieldColors = TextFieldDefaults.colors(
-                focusedTextColor = Color.White,
-                unfocusedTextColor = Color.White,
-                focusedContainerColor = Color(0xFF2C4A5E),
-                unfocusedContainerColor = Color(0xFF2C4A5E)
-            )
-            
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextField(value = routeName, onValueChange = { routeName = it }, label = { Text("Nombre Ruta") }, colors = textFieldColors, modifier = Modifier.fillMaxWidth())
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextField(value = trainNumber, onValueChange = { trainNumber = it }, label = { Text("Nº Tren") }, colors = textFieldColors, modifier = Modifier.weight(1f))
-                    TextField(value = maxSpeed, onValueChange = { maxSpeed = it }, label = { Text("V. Máx") }, colors = textFieldColors, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-                }
-            }
-            
-            HorizontalDivider(color = Color.White.copy(alpha = 0.2f))
-
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(bottom = 80.dp)
-            ) {
-                items(points) { point ->
-                    val typeInfo = if (point.type == PointType.STATION) {
-                        "E: ${point.arrivalTime} S: ${point.departureTime}"
-                    } else {
-                        "PK: ${point.kilometerPoint} - ${point.endKm ?: point.kilometerPoint} | V.Máx: ${point.speedLimit}"
-                    }
-                    ListItem(
-                        headlineContent = { Text(point.name, color = Color.White) },
-                        supportingContent = { Text(if (point.type == PointType.STATION) "PK: ${point.kilometerPoint} | $typeInfo" else typeInfo, color = Color.White.copy(alpha = 0.7f)) },
-                        trailingContent = { 
-                            Row {
-                                IconButton(onClick = { pointToEdit = point }) { Icon(Icons.Default.Edit, null, tint = Color.White) }
-                                IconButton(onClick = { scope.launch { viewModel.ferroDao.deleteRoutePoint(point) } }) { Icon(Icons.Default.Delete, null, tint = Color.White) }
+                    Card(Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                        Column(Modifier.padding(16.dp)) {
+                            Text("PRÓX. LIMITACIÓN", style = MaterialTheme.typography.labelSmall, color = Color.Yellow)
+                            Text(viewModel.nextLimitation.collectAsState().value?.name ?: "Ninguna", fontWeight = FontWeight.Bold, color = Color.White)
+                            viewModel.nextLimitation.collectAsState().value?.let {
+                                Text("A ${String.format(Locale.getDefault(), "%.1f", abs(it.kilometerPoint - pk))} km", style = MaterialTheme.typography.bodySmall, color = Color.White)
                             }
-                        },
-                        colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showEditPK) {
+        var textValue by remember { mutableStateOf(pk.toString()) }
+        AlertDialog(
+            onDismissRequest = { showEditPK = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            title = { Text("Ajustar PK Manual", color = Color.White) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = textValue,
+                        onValueChange = { textValue = it },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        label = { Text("Kilometraje") },
+                        colors = dialogColors
                     )
                 }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    textValue.replace(",", ".").toDoubleOrNull()?.let { viewModel.setPK(it) }
+                    showEditPK = false
+                }) { Text("Guardar", color = MaterialTheme.colorScheme.primary) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEditPK = false }) { Text("Cancelar", color = Color.LightGray) }
             }
-        }
-        if (showAddPoint) {
-            AddPointDialog(stations = allStations, onDismiss = { showAddPoint = false }, onConfirm = { point -> scope.launch { viewModel.ferroDao.insertRoutePoint(point.copy(routeId = routeId, order = points.size)) }; showAddPoint = false })
-        }
-        if (pointToEdit != null) {
-            AddPointDialog(
-                stations = allStations,
-                editingPoint = pointToEdit,
-                onDismiss = { pointToEdit = null },
-                onConfirm = { point -> 
-                    scope.launch { viewModel.ferroDao.insertRoutePoint(point) }
-                    pointToEdit = null
-                }
-            )
-        }
+        )
     }
-}
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun AddPointDialog(stations: List<StationEntity>, editingPoint: RoutePointEntity? = null, onDismiss: () -> Unit, onConfirm: (RoutePointEntity) -> Unit) {
-    var type by remember { mutableStateOf(editingPoint?.type ?: PointType.STATION) }
-    var name by remember { mutableStateOf(editingPoint?.name ?: "") }
-    var pk by remember { mutableStateOf(editingPoint?.kilometerPoint?.toString() ?: "") }
-    var endPk by remember { mutableStateOf(editingPoint?.endKm?.toString() ?: "") }
-    var arrival by remember { mutableStateOf(editingPoint?.arrivalTime ?: "") }
-    var departure by remember { mutableStateOf(editingPoint?.departureTime ?: "") }
-    var limit by remember { mutableStateOf(editingPoint?.speedLimit?.toString() ?: "") }
-
-    var showStationSelector by remember { mutableStateOf(false) }
-
-    val textFieldColors = TextFieldDefaults.colors(
-        focusedTextColor = Color.White,
-        unfocusedTextColor = Color.White,
-        focusedContainerColor = Color(0xFF2C4A5E),
-        unfocusedContainerColor = Color(0xFF2C4A5E)
-    )
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surface,
-        title = { Text(if(editingPoint == null) "Añadir Punto" else "Editar Punto", color = Color.White) },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row {
-                    FilterChip(selected = type == PointType.STATION, onClick = { type = PointType.STATION }, label = { Text("Estación") })
-                    Spacer(Modifier.width(8.dp))
-                    FilterChip(selected = type == PointType.LIMITATION, onClick = { type = PointType.LIMITATION }, label = { Text("Limitación") })
-                }
-
-                if (type == PointType.STATION) {
-                    Button(onClick = { showStationSelector = true }, modifier = Modifier.fillMaxWidth()) {
-                        Text("Seleccionar de Base de Datos")
-                    }
-                }
-
-                TextField(value = name, onValueChange = { name = it }, label = { Text("Nombre") }, colors = textFieldColors)
-                TextField(value = pk, onValueChange = { pk = it }, label = { Text(if (type == PointType.STATION) "PK" else "PK Inicio") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), colors = textFieldColors)
-                
-                if (type == PointType.LIMITATION) {
-                    TextField(value = endPk, onValueChange = { endPk = it }, label = { Text("PK Final") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), colors = textFieldColors)
-                    TextField(value = limit, onValueChange = { limit = it }, label = { Text("V. Máx") }, colors = textFieldColors)
-                }
-                
-                if (type == PointType.STATION) {
-                    TextField(value = arrival, onValueChange = { arrival = it }, label = { Text("H. Entrada (HH:mm)") }, colors = textFieldColors)
-                    TextField(value = departure, onValueChange = { departure = it }, label = { Text("H. Salida (HH:mm)") }, colors = textFieldColors)
-                }
-            }
-        },
-        confirmButton = { Button(onClick = { 
-            val updatedPoint = editingPoint?.copy(
-                type = type,
-                name = name,
-                kilometerPoint = pk.replace(',', '.').toDoubleOrNull() ?: 0.0,
-                endKm = if (type == PointType.LIMITATION) endPk.replace(',', '.').toDoubleOrNull() else null,
-                arrivalTime = arrival,
-                departureTime = departure,
-                speedLimit = limit.toIntOrNull()
-            ) ?: RoutePointEntity(
-                routeId = 0, 
-                order = 0, 
-                type = type, 
-                name = name, 
-                kilometerPoint = pk.replace(',', '.').toDoubleOrNull() ?: 0.0, 
-                endKm = if (type == PointType.LIMITATION) endPk.replace(',', '.').toDoubleOrNull() else null,
-                arrivalTime = arrival, 
-                departureTime = departure, 
-                speedLimit = limit.toIntOrNull()
-            )
-            onConfirm(updatedPoint)
-            onDismiss()
-        }) { Text(if(editingPoint == null) "Añadir" else "Guardar") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar", color = Color.White) } }
-    )
-
-    if (showStationSelector) {
+    if (showIncidentDialog) {
         AlertDialog(
-            onDismissRequest = { showStationSelector = false },
-            title = { Text("Seleccionar Estación", color = Color.White) },
+            onDismissRequest = { showIncidentDialog = false },
             containerColor = MaterialTheme.colorScheme.surface,
+            title = { Text("Registrar Incidencia", color = Color.White) },
             text = {
-                Surface(
-                    modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp),
-                    color = Color.Transparent
-                ) {
-                    LazyColumn {
-                        items(stations) { station ->
-                            ListItem(
-                                headlineContent = { Text(station.name, color = Color.White) },
-                                supportingContent = { Text("PK: ${station.kilometerPoint}", color = Color.White.copy(0.7f)) },
-                                modifier = Modifier.clickable {
-                                    name = station.name
-                                    pk = station.kilometerPoint.toString()
-                                    showStationSelector = false
-                                },
-                                colors = ListItemDefaults.colors(containerColor = Color.Transparent)
-                            )
-                        }
-                    }
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Selecciona el tipo de incidencia ocurrida en el PK ${String.format(Locale.getDefault(), "%.3f", pk)}:", color = Color.White)
+                    Button(
+                        onClick = { viewModel.addIncident("Finalización de ATV"); showIncidentDialog = false },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2196F3))
+                    ) { Text("Finalización de ATV", color = Color.White) }
+                    
+                    Button(
+                        onClick = { viewModel.addIncident("Incidencia de Circulación"); showIncidentDialog = false },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF9800))
+                    ) { Text("Incidencia de Circulación", color = Color.White) }
+                    
+                    Button(
+                        onClick = { viewModel.addIncident("Incidencia de Vehículo"); showIncidentDialog = false },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                    ) { Text("Incidencia de Vehículo", color = Color.White) }
                 }
             },
             confirmButton = {},
-            dismissButton = { TextButton(onClick = { showStationSelector = false }) { Text("Cerrar", color = Color.White) } }
+            dismissButton = { TextButton(onClick = { showIncidentDialog = false }) { Text("Cancelar", color = Color.LightGray) } }
+        )
+    }
+
+    if (showFinishDialog) {
+        var notes by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showFinishDialog = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            title = { Text("Finalizar Viaje", color = Color.White) },
+            text = {
+                Column {
+                    Text("¿Deseas cerrar la jornada actual?", color = Color.White)
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = notes, 
+                        onValueChange = { notes = it }, 
+                        label = { Text("Notas/Observaciones") },
+                        colors = dialogColors
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.finishWorkShift(notes)
+                    showFinishDialog = false
+                }) { Text("Finalizar", color = MaterialTheme.colorScheme.primary) }
+            },
+            dismissButton = { TextButton(onClick = { showFinishDialog = false }) { Text("Volver", color = Color.LightGray) } }
         )
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(viewModel: MainViewModel) {
-    val shifts by viewModel.allWorkShifts.collectAsState(initial = emptyList())
-    val dateFormat = SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault())
+fun RoutesListScreen(viewModel: MainViewModel, onNavigateToEditPoints: (Long) -> Unit) {
+    val routes by viewModel.allRoutes.collectAsState()
+    var showAddDialog by remember { mutableStateOf(false) }
+    var routeToEdit by remember { mutableStateOf<RouteEntity?>(null) }
+    var routeToDelete by remember { mutableStateOf<RouteEntity?>(null) }
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
-    Scaffold(topBar = { TopAppBar(title = { Text("Cuaderno de Bitácora", color = Color.White) }, colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)) }) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize().background(MaterialTheme.colorScheme.background).padding(16.dp)) {
-            Text("Viajes Guardados", color = Color.White, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(bottom = 16.dp))
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(bottom = 16.dp)) { 
-                items(shifts) { shift -> 
-                    var expanded by remember { mutableStateOf(false) }
-                    
-                    val routePoints by if (shift.routeId != null) {
-                        viewModel.ferroDao.getPointsForRoute(shift.routeId).collectAsState(initial = emptyList())
-                    } else {
-                        remember { mutableStateOf(emptyList<RoutePointEntity>()) }
-                    }
+    val dialogColors = TextFieldDefaults.colors(
+        focusedTextColor = Color.White,
+        unfocusedTextColor = Color.White,
+        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+        focusedLabelColor = MaterialTheme.colorScheme.primary,
+        unfocusedLabelColor = Color.LightGray,
+        cursorColor = MaterialTheme.colorScheme.primary
+    )
 
-                    Card(
-                        modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                    ) {
-                        Column(Modifier.padding(16.dp)) {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text("Tren: ${shift.trainNumber}", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, fontSize = 18.sp)
-                                Text(dateFormat.format(Date(shift.startTime)), style = MaterialTheme.typography.labelSmall, color = Color.White.copy(0.6f))
-                            }
-                            Spacer(Modifier.height(4.dp))
-                            Text("${String.format(Locale.getDefault(), "%.1f", shift.totalKilometers)} km recorridos", color = Color.White, fontSize = 16.sp)
-                            
-                            AnimatedVisibility(visible = expanded) {
-                                Column(Modifier.padding(top = 12.dp)) {
-                                    if (shift.notes.isNotEmpty()) {
-                                        Text("Observaciones:", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary, fontSize = 14.sp)
-                                        Text(shift.notes, color = Color.White.copy(0.9f), modifier = Modifier.padding(bottom = 8.dp))
-                                    }
-                                    
-                                    if (routePoints.isNotEmpty()) {
-                                        Text("Itinerario de la Ruta:", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, fontSize = 14.sp)
-                                        routePoints.forEach { point ->
-                                            Text(
-                                                text = if(point.type == PointType.STATION) "• ${point.name} (PK ${point.kilometerPoint}) - ${point.arrivalTime ?: "--:--"}"
-                                                       else "⚠ Limitación PK ${point.kilometerPoint} (${point.speedLimit} km/h)",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = Color.White.copy(alpha = 0.7f),
-                                                modifier = Modifier.padding(start = 8.dp, top = 2.dp)
-                                            )
-                                        }
-                                    }
-                                    
-                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                                        IconButton(onClick = { viewModel.deleteWorkShift(shift) }) {
-                                            Icon(Icons.Default.Delete, "Borrar", tint = Color.Red.copy(0.7f))
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } 
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        uri?.let {
+            scope.launch {
+                val json = viewModel.getAllRoutesExportJson()
+                context.contentResolver.openOutputStream(it)?.use { os ->
+                    os.write(json.toByteArray())
+                }
             }
         }
+    }
+
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri?.let {
+            scope.launch {
+                context.contentResolver.openInputStream(it)?.bufferedReader()?.use { reader ->
+                    viewModel.importRoutesFromJson(reader.readText())
+                }
+            }
+        }
+    }
+
+    Scaffold(
+        topBar = { 
+            TopAppBar(
+                title = { Text("Mis Rutas", color = Color.White) },
+                actions = {
+                    IconButton(onClick = { importLauncher.launch("application/json") }) { Icon(Icons.Default.FileUpload, "Importar", tint = Color.White) }
+                    IconButton(onClick = { exportLauncher.launch("respaldo_rutas_ferro.json") }) { Icon(Icons.Default.FileDownload, "Exportar", tint = Color.White) }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) 
+        },
+        floatingActionButton = {
+            FloatingActionButton(onClick = { showAddDialog = true }, containerColor = MaterialTheme.colorScheme.primary, contentColor = Color.White) { Icon(Icons.Default.Add, "Nueva Ruta") }
+        }
+    ) { padding ->
+        LazyColumn(Modifier.padding(padding).fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            itemsIndexed(routes) { _, route ->
+                ListItem(
+                    headlineContent = { Text(route.name, fontWeight = FontWeight.Bold) },
+                    supportingContent = { Text("Tren: ${route.trainNumber} | Máx: ${route.maxSpeed} km/h") },
+                    trailingContent = {
+                        Row {
+                            IconButton(onClick = { viewModel.invertRoute(route) }) { Icon(Icons.AutoMirrored.Filled.CompareArrows, "Invertir") }
+                            IconButton(onClick = { viewModel.cloneRoute(route) }) { Icon(Icons.Default.CopyAll, "Clonar") }
+                            IconButton(onClick = { routeToEdit = route }) { Icon(Icons.Default.Edit, "Editar", tint = MaterialTheme.colorScheme.primary) }
+                            IconButton(onClick = { routeToDelete = route }) { Icon(Icons.Default.Delete, "Borrar", tint = MaterialTheme.colorScheme.error) }
+                        }
+                    },
+                    modifier = Modifier.clickable { viewModel.selectRoute(route.id) },
+                    colors = ListItemDefaults.colors(containerColor = Color.Transparent, headlineColor = Color.White, supportingColor = Color.LightGray)
+                )
+                HorizontalDivider(color = Color.DarkGray, thickness = 0.5.dp)
+            }
+        }
+    }
+
+    if (showAddDialog) {
+        var name by remember { mutableStateOf("") }
+        var number by remember { mutableStateOf("") }
+        var speed by remember { mutableStateOf("80") }
+        
+        AlertDialog(
+            onDismissRequest = { showAddDialog = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            title = { Text("Nueva Ruta", color = Color.White) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Nombre de la ruta") }, colors = dialogColors)
+                    OutlinedTextField(value = number, onValueChange = { number = it }, label = { Text("Número de tren") }, colors = dialogColors)
+                    OutlinedTextField(
+                        value = speed, 
+                        onValueChange = { speed = it }, 
+                        label = { Text("Velocidad Máxima") }, 
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        colors = dialogColors
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val s = speed.toIntOrNull() ?: 80
+                    scope.launch { viewModel.ferroDao.insertRoute(RouteEntity(name = name, trainNumber = number, maxSpeed = s, trainLength = 0)) }
+                    showAddDialog = false
+                }) { Text("Crear", color = MaterialTheme.colorScheme.primary) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddDialog = false }) { Text("Cancelar", color = Color.LightGray) }
+            }
+        )
+    }
+
+    if (routeToEdit != null) {
+        var name by remember { mutableStateOf(routeToEdit?.name ?: "") }
+        var number by remember { mutableStateOf(routeToEdit?.trainNumber ?: "") }
+        var speed by remember { mutableStateOf(routeToEdit?.maxSpeed.toString()) }
+
+        AlertDialog(
+            onDismissRequest = { routeToEdit = null },
+            containerColor = MaterialTheme.colorScheme.surface,
+            title = { Text("Editar Datos de Ruta", color = Color.White) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Nombre") }, colors = dialogColors)
+                    OutlinedTextField(value = number, onValueChange = { number = it }, label = { Text("Tren") }, colors = dialogColors)
+                    OutlinedTextField(value = speed, onValueChange = { speed = it }, label = { Text("Vel. Máxima") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), colors = dialogColors)
+                    
+                    Spacer(Modifier.height(16.dp))
+                    Button(
+                        onClick = { 
+                            onNavigateToEditPoints(routeToEdit!!.id)
+                            routeToEdit = null
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    ) {
+                        Icon(Icons.Default.LocationOn, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Editar Paradas y Limitaciones")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    routeToEdit?.let { 
+                        viewModel.updateRoute(it.copy(name = name, trainNumber = number, maxSpeed = speed.toIntOrNull() ?: 80))
+                    }
+                    routeToEdit = null
+                }) { Text("Guardar", color = MaterialTheme.colorScheme.primary) }
+            },
+            dismissButton = {
+                TextButton(onClick = { routeToEdit = null }) { Text("Cancelar", color = Color.LightGray) }
+            }
+        )
+    }
+
+    if (routeToDelete != null) {
+        AlertDialog(
+            onDismissRequest = { routeToDelete = null },
+            containerColor = MaterialTheme.colorScheme.surface,
+            title = { Text("Eliminar Ruta", color = Color.White) },
+            text = { Text("¿Seguro que deseas eliminar '${routeToDelete?.name}'?", color = Color.White) },
+            confirmButton = { TextButton(onClick = { routeToDelete?.let { viewModel.deleteRoute(it) }; routeToDelete = null }) { Text("Eliminar", color = Color.Red) } },
+            dismissButton = { TextButton(onClick = { routeToDelete = null }) { Text("Cancelar", color = Color.LightGray) } }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+fun EditRoutePointsScreen(viewModel: MainViewModel, routeId: Long, onBack: () -> Unit) {
+    var routeEntity by remember { mutableStateOf<RouteEntity?>(null) }
+    val points by viewModel.ferroDao.getPointsForRoute(routeId).collectAsState(initial = emptyList())
+    
+    val itemList = remember { mutableStateListOf<RoutePointEntity>() }
+    val haptic = LocalHapticFeedback.current
+    
+    LaunchedEffect(points) {
+        if (points.isNotEmpty()) {
+            itemList.clear()
+            itemList.addAll(points.sortedBy { it.order })
+        }
+    }
+
+    var showAddPoint by remember { mutableStateOf(false) }
+    var pointToEdit by remember { mutableStateOf<RoutePointEntity?>(null) }
+    val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
+
+    val dialogColors = TextFieldDefaults.colors(
+        focusedTextColor = Color.White,
+        unfocusedTextColor = Color.White,
+        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+        focusedLabelColor = MaterialTheme.colorScheme.primary,
+        unfocusedLabelColor = Color.LightGray,
+        cursorColor = MaterialTheme.colorScheme.primary
+    )
+
+    LaunchedEffect(routeId) {
+        routeEntity = viewModel.ferroDao.getRouteById(routeId)
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Puntos de ${routeEntity?.name ?: ""}", color = Color.White) },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Volver", tint = Color.White) } },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+            )
+        },
+        floatingActionButton = {
+            FloatingActionButton(onClick = { showAddPoint = true }, containerColor = MaterialTheme.colorScheme.primary, contentColor = Color.White) { Icon(Icons.Default.AddLocation, "Añadir Punto") }
+        }
+    ) { padding ->
+        Column(Modifier.padding(padding).fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            Text("Mantén pulsado cualquier punto para desplazar", color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.labelSmall)
+            
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.weight(1f)
+            ) {
+                itemsIndexed(itemList, key = { _, item -> item.id }) { index, point ->
+                    val scheduleText = when {
+                        index == 0 && point.type == PointType.STATION -> "Salida: ${point.departureTime ?: "--:--"}"
+                        index == itemList.size - 1 && point.type == PointType.STATION -> "Llegada: ${point.arrivalTime ?: "--:--"}"
+                        point.type == PointType.STATION -> {
+                            val arr = point.arrivalTime
+                            val dep = point.departureTime
+                            when {
+                                !arr.isNullOrBlank() && !dep.isNullOrBlank() -> "Arr: $arr - Dep: $dep"
+                                !arr.isNullOrBlank() -> "Llegada: $arr"
+                                !dep.isNullOrBlank() -> "Salida: $dep"
+                                else -> "--:--"
+                            }
+                        }
+                        else -> ""
+                    }
+
+                    var isDragging by remember { mutableStateOf(false) }
+                    var offsetY by remember { mutableStateOf(0f) }
+                    val elevation by animateDpAsState(if (isDragging) 12.dp else 0.dp, label = "elevation")
+
+                    Card(
+                        elevation = CardDefaults.cardElevation(defaultElevation = elevation),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isDragging) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.9f) else Color.Transparent
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .animateItem()
+                            .offset { IntOffset(0, offsetY.roundToInt()) }
+                            .zIndex(if (isDragging) 10f else 1f)
+                            .pointerInput(itemList) {
+                                detectDragGesturesAfterLongPress(
+                                    onDragStart = { 
+                                        isDragging = true
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    },
+                                    onDragEnd = { 
+                                        isDragging = false
+                                        offsetY = 0f
+                                        viewModel.reorderPoints(routeId, itemList.toList())
+                                    },
+                                    onDragCancel = { 
+                                        isDragging = false 
+                                        offsetY = 0f
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        offsetY += dragAmount.y
+                                        
+                                        val currentIdx = itemList.indexOfFirst { it.id == point.id }
+                                        if (currentIdx != -1) {
+                                            val threshold = 100f 
+                                            if (offsetY > threshold && currentIdx < itemList.size - 1) {
+                                                itemList.add(currentIdx + 1, itemList.removeAt(currentIdx))
+                                                offsetY -= 140f 
+                                            } else if (offsetY < -threshold && currentIdx > 0) {
+                                                itemList.add(currentIdx - 1, itemList.removeAt(currentIdx))
+                                                offsetY += 140f
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+                    ) {
+                        ListItem(
+                            headlineContent = { Text(point.name, color = Color.White, fontWeight = if(isDragging) FontWeight.Bold else FontWeight.Normal) },
+                            supportingContent = { 
+                                Text(
+                                    when(point.type) {
+                                        PointType.STATION -> "Estación - PK: ${point.kilometerPoint} ${if(scheduleText.isNotEmpty()) "- $scheduleText" else ""}"
+                                        PointType.LIMITATION -> "LIMITACIÓN: ${point.speedLimit} km/h - Inicio: ${point.kilometerPoint} Fin: ${point.endKm ?: "--"}"
+                                    },
+                                    color = Color.LightGray
+                                )
+                            },
+                            leadingContent = {
+                                Icon(
+                                    imageVector = if (point.type == PointType.STATION) Icons.Default.Place else Icons.Default.Warning,
+                                    contentDescription = null,
+                                    tint = if (point.type == PointType.STATION) MaterialTheme.colorScheme.primary else Color.Yellow,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                            },
+                            trailingContent = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(onClick = { pointToEdit = point }) { Icon(Icons.Default.Edit, "Editar", tint = MaterialTheme.colorScheme.primary) }
+                                    IconButton(onClick = { scope.launch { viewModel.ferroDao.deleteRoutePoint(point) } }) { Icon(Icons.Default.Delete, "Borrar", tint = Color.Red) }
+                                    Icon(Icons.Default.Reorder, null, tint = Color.Gray, modifier = Modifier.padding(start = 4.dp))
+                                }
+                            },
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                        )
+                    }
+                    HorizontalDivider(color = Color.DarkGray, thickness = 0.5.dp)
+                }
+            }
+        }
+    }
+
+    if (showAddPoint || pointToEdit != null) {
+        val editing = pointToEdit != null
+        var name by remember(showAddPoint, pointToEdit) { mutableStateOf(pointToEdit?.name ?: "") }
+        var pk by remember(showAddPoint, pointToEdit) { mutableStateOf(pointToEdit?.kilometerPoint?.toString() ?: "") }
+        var type by remember(showAddPoint, pointToEdit) { mutableStateOf(pointToEdit?.type ?: PointType.STATION) }
+        var limit by remember(showAddPoint, pointToEdit) { mutableStateOf(pointToEdit?.speedLimit?.toString() ?: "") }
+        var endKm by remember(showAddPoint, pointToEdit) { mutableStateOf(pointToEdit?.endKm?.toString() ?: "") }
+        var arrival by remember(showAddPoint, pointToEdit) { mutableStateOf(pointToEdit?.arrivalTime ?: "") }
+        var departure by remember(showAddPoint, pointToEdit) { mutableStateOf(pointToEdit?.departureTime ?: "") }
+
+        AlertDialog(
+            onDismissRequest = { showAddPoint = false; pointToEdit = null },
+            containerColor = MaterialTheme.colorScheme.surface,
+            title = { Text(if (editing) "Editar Punto" else "Añadir Punto", color = Color.White) },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row {
+                        FilterChip(
+                            selected = type == PointType.STATION, 
+                            onClick = { type = PointType.STATION }, 
+                            label = { Text("Estación", color = Color.White) }
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        FilterChip(
+                            selected = type == PointType.LIMITATION, 
+                            onClick = { type = PointType.LIMITATION }, 
+                            label = { Text("Limitación", color = Color.White) }
+                        )
+                    }
+                    OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Nombre") }, colors = dialogColors)
+                    OutlinedTextField(
+                        value = pk, 
+                        onValueChange = { pk = it }, 
+                        label = { Text("PK Inicio") }, 
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        colors = dialogColors
+                    )
+                    if (type == PointType.STATION) {
+                        OutlinedTextField(value = arrival, onValueChange = { arrival = it }, label = { Text("Hora llegada (HH:mm)") }, colors = dialogColors)
+                        OutlinedTextField(value = departure, onValueChange = { departure = it }, label = { Text("Hora salida (HH:mm)") }, colors = dialogColors)
+                    } else {
+                        OutlinedTextField(
+                            value = limit, 
+                            onValueChange = { limit = it }, 
+                            label = { Text("Vel. Máxima") }, 
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            colors = dialogColors
+                        )
+                        OutlinedTextField(
+                            value = endKm, 
+                            onValueChange = { endKm = it }, 
+                            label = { Text("PK Final") }, 
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            colors = dialogColors
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val k = pk.replace(",", ".").toDoubleOrNull() ?: 0.0
+                    val l = limit.toIntOrNull()
+                    val e = endKm.replace(",", ".").toDoubleOrNull()
+                    val currentPointId = pointToEdit?.id ?: 0L
+                    val currentOrder = pointToEdit?.order ?: itemList.size
+
+                    scope.launch {
+                        viewModel.ferroDao.insertRoutePoint(RoutePointEntity(
+                            id = currentPointId,
+                            routeId = routeId,
+                            order = currentOrder,
+                            type = type,
+                            name = name,
+                            kilometerPoint = k,
+                            speedLimit = if (type == PointType.LIMITATION) l else null,
+                            endKm = if (type == PointType.LIMITATION) e else null,
+                            arrivalTime = if (type == PointType.STATION) arrival.ifBlank { null } else null,
+                            departureTime = if (type == PointType.STATION) departure.ifBlank { null } else null
+                        ))
+                    }
+                    showAddPoint = false
+                    pointToEdit = null
+                }) { Text(if (editing) "Guardar" else "Añadir", color = MaterialTheme.colorScheme.primary) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddPoint = false; pointToEdit = null }) { Text("Cancelar", color = Color.LightGray) }
+            }
+        )
     }
 }
 
@@ -955,9 +899,129 @@ fun SettingsScreen(viewModel: MainViewModel) {
 @Composable
 fun RouteSheetScreen(viewModel: MainViewModel, onBack: () -> Unit) {
     val points by viewModel.currentRoutePoints.collectAsState()
-    Scaffold(topBar = { TopAppBar(title = { Text("Itinerario Activo", color = Color.White) }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White) } }, colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)) }) { padding ->
-        LazyColumn(Modifier.padding(padding).fillMaxSize().background(MaterialTheme.colorScheme.background).padding(16.dp)) {
-            items(points) { point -> ListItem(headlineContent = { Text(point.name, color = Color.White) }, supportingContent = { Text("PK: ${point.kilometerPoint}", color = Color.White.copy(alpha = 0.7f)) }, colors = ListItemDefaults.colors(containerColor = Color.Transparent)) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Libro de Itinerario", color = Color.White) },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Volver", tint = Color.White) } },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+            )
         }
+    ) { padding ->
+        LazyColumn(Modifier.padding(padding).fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            itemsIndexed(points) { index, point ->
+                val scheduleText = when {
+                    index == 0 && point.type == PointType.STATION -> "Salida: ${point.departureTime ?: "--:--"}"
+                    index == points.size - 1 && point.type == PointType.STATION -> "Llegada: ${point.arrivalTime ?: "--:--"}"
+                    point.type == PointType.STATION -> {
+                        val arr = point.arrivalTime
+                        val dep = point.departureTime
+                        when {
+                            !arr.isNullOrBlank() && !dep.isNullOrBlank() -> "Arr: $arr - Dep: $dep"
+                            !arr.isNullOrBlank() -> "Llegada: $arr"
+                            !dep.isNullOrBlank() -> "Salida: $dep"
+                            else -> "--:--"
+                        }
+                    }
+                    else -> ""
+                }
+
+                ListItem(
+                    headlineContent = { Text(point.name, fontWeight = FontWeight.Bold, color = Color.White) },
+                    supportingContent = { 
+                        val pkText = if (point.type == PointType.LIMITATION) {
+                            "PK: ${point.kilometerPoint} al ${point.endKm ?: "--"}"
+                        } else {
+                            "PK: ${point.kilometerPoint}"
+                        }
+                        Text("$pkText | ${if(point.type == PointType.STATION) "Estación" else "Limitación"}", color = Color.LightGray) 
+                    },
+                    trailingContent = {
+                        if (point.type == PointType.STATION) {
+                            Text(scheduleText, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        } else {
+                            Text("${point.speedLimit} km/h", color = Color.Yellow)
+                        }
+                    },
+                    colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                )
+                HorizontalDivider(color = Color.DarkGray, thickness = 0.5.dp)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsScreen(viewModel: MainViewModel) {
+    val shifts by viewModel.allWorkShifts.collectAsState()
+    val routes by viewModel.allRoutes.collectAsState()
+    val context = LocalContext.current
+    var shiftForSummary by remember { mutableStateOf<WorkShiftEntity?>(null) }
+
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(16.dp)) {
+        Text("Cuaderno de Bitácora", style = MaterialTheme.typography.headlineMedium, color = Color.White)
+        Spacer(Modifier.height(16.dp))
+        
+        Text("Historial de Jornadas", style = MaterialTheme.typography.titleLarge, color = Color.White)
+        Spacer(Modifier.height(8.dp))
+
+        LazyColumn(Modifier.fillMaxSize()) {
+            itemsIndexed(shifts) { _, shift ->
+                val routeName = routes.find { it.id == shift.routeId }?.name ?: "Ruta desconocida"
+                val date = SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault()).format(Date(shift.startTime))
+                
+                val durationText = if (shift.endTime != null) {
+                    val mins = (shift.endTime - shift.startTime) / 60000
+                    " | Duración: ${mins / 60}h ${mins % 60}m"
+                } else ""
+
+                ListItem(
+                    headlineContent = { Text(routeName, color = Color.White) },
+                    supportingContent = { Text("Inicio: $date | Dist: ${String.format(Locale.getDefault(), "%.2f", shift.totalKilometers)} km$durationText", color = Color.LightGray) },
+                    trailingContent = {
+                        Row {
+                            IconButton(onClick = { shiftForSummary = shift }) { Icon(Icons.Default.Summarize, "Resumen", tint = MaterialTheme.colorScheme.primary) }
+                            IconButton(onClick = { viewModel.deleteWorkShift(shift) }) { Icon(Icons.Default.Delete, null, tint = Color.Red) }
+                        }
+                    },
+                    colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                )
+                HorizontalDivider(color = Color.DarkGray)
+            }
+        }
+    }
+
+    if (shiftForSummary != null) {
+        var summaryText by remember { mutableStateOf("Cargando...") }
+        LaunchedEffect(shiftForSummary) {
+            summaryText = viewModel.getShiftSummaryText(shiftForSummary!!)
+        }
+
+        AlertDialog(
+            onDismissRequest = { shiftForSummary = null },
+            containerColor = MaterialTheme.colorScheme.surface,
+            title = { Text("Resumen de Jornada", color = Color.White) },
+            text = {
+                Text(summaryText, color = Color.White, style = MaterialTheme.typography.bodyMedium)
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, summaryText)
+                    }
+                    context.startActivity(Intent.createChooser(intent, "Compartir resumen"))
+                }) {
+                    Icon(Icons.Default.Share, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Compartir")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { shiftForSummary = null }) { Text("Cerrar", color = Color.LightGray) }
+            }
+        )
     }
 }

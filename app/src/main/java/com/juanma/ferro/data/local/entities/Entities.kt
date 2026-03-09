@@ -36,16 +36,6 @@ enum class PointType {
     STATION, LIMITATION
 }
 
-@Serializable
-@Entity(tableName = "stations")
-data class StationEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val name: String,
-    val kilometerPoint: Double,
-    val latitude: Double = 0.0,
-    val longitude: Double = 0.0
-)
-
 @Entity(tableName = "work_shifts")
 data class WorkShiftEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

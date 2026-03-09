@@ -33,15 +33,6 @@ interface FerroDao {
     @Query("DELETE FROM route_points WHERE routeId = :routeId")
     suspend fun deletePointsForRoute(routeId: Long)
 
-    @Query("SELECT * FROM stations ORDER BY name ASC")
-    fun getAllStations(): Flow<List<StationEntity>>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertStation(station: StationEntity): Long
-
-    @Delete
-    suspend fun deleteStation(station: StationEntity)
-
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertWorkShift(workShift: WorkShiftEntity): Long
 

@@ -12,10 +12,9 @@ import com.juanma.ferro.data.local.entities.*
         RouteEntity::class,
         RoutePointEntity::class,
         StationVisitEntity::class,
-        IncidentEntity::class,
-        StationEntity::class
+        IncidentEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
