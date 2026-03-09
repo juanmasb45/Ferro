@@ -79,6 +79,8 @@ class MainViewModel @Inject constructor(
 
     private val visitedPointIds = mutableSetOf<Long>()
     private val announcedLimitIds = mutableSetOf<Long>()
+    
+    private var lastVisitedIndex = -1
 
     private val _proximityAlert = MutableStateFlow<String?>(null)
     val proximityAlert = _proximityAlert.asStateFlow()
@@ -143,11 +145,15 @@ class MainViewModel @Inject constructor(
     }
 
     private fun observeProximityAndSchedule() {
-        combine(currentPK, currentRoutePoints, _isAscending) { pk, points, isAsc ->
+        combine(currentPK, currentRoutePoints) { pk, points ->
             if (points.isEmpty()) return@combine
 
-            points.forEach { point ->
-                if (abs(point.kilometerPoint - pk) < 0.2 && !visitedPointIds.contains(point.id)) {
+            // El orden es FIJO, no depende del sentido ascendente/descendente
+            val nextPointToDetect = points.getOrNull(lastVisitedIndex + 1)
+            
+            nextPointToDetect?.let { point ->
+                if (abs(point.kilometerPoint - pk) < 0.2) {
+                    lastVisitedIndex++
                     visitedPointIds.add(point.id)
                     if (point.type == PointType.STATION) {
                         recordStationVisit(point)
@@ -155,16 +161,12 @@ class MainViewModel @Inject constructor(
                 }
             }
 
-            val upcomingPoints = if (isAsc) {
-                points.filter { it.kilometerPoint > pk + 0.1 }.sortedBy { it.kilometerPoint }
-            } else {
-                points.filter { it.kilometerPoint < pk - 0.1 }.sortedByDescending { it.kilometerPoint }
-            }
-
-            val nextSt = upcomingPoints.firstOrNull { it.type == PointType.STATION }
+            val remainingPoints = points.drop(lastVisitedIndex + 1)
+            
+            val nextSt = remainingPoints.firstOrNull { it.type == PointType.STATION }
             _nextStation.value = nextSt
 
-            val nextLimit = upcomingPoints.firstOrNull { it.type == PointType.LIMITATION }
+            val nextLimit = remainingPoints.firstOrNull { it.type == PointType.LIMITATION }
             _nextLimitation.value = nextLimit
 
             val active = points.filter { it.type == PointType.LIMITATION }.find { 
@@ -251,6 +253,7 @@ class MainViewModel @Inject constructor(
     fun selectRoute(routeId: Long) {
         visitedPointIds.clear()
         announcedLimitIds.clear()
+        lastVisitedIndex = -1
         _selectedRouteId.value = routeId
         viewModelScope.launch {
             val route = ferroDao.getRouteById(routeId)
@@ -274,12 +277,15 @@ class MainViewModel @Inject constructor(
                 _selectedRouteId.value = null
                 visitedPointIds.clear()
                 announcedLimitIds.clear()
+                lastVisitedIndex = -1
             }
         }
     }
 
     fun setPK(pk: Double) { _manualPK.value = pk }
-    fun setDirection(ascending: Boolean) { _isAscending.value = ascending }
+    fun setDirection(ascending: Boolean) { 
+        _isAscending.value = ascending
+    }
 
     fun addIncident(type: String) {
         viewModelScope.launch {

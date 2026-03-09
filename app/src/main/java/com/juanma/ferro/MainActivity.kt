@@ -338,15 +338,29 @@ fun FerroDashboard(viewModel: MainViewModel, onNavigateToRouteDetail: () -> Unit
                     FilterChip(
                         selected = isAscending,
                         onClick = { viewModel.setDirection(true) },
-                        label = { Text("Ascendente", color = Color.White) },
-                        leadingIcon = if (isAscending) { { Icon(Icons.Default.ArrowUpward, null, Modifier.size(16.dp)) } } else null
+                        label = { Text("Ascendente") },
+                        leadingIcon = if (isAscending) { { Icon(Icons.Default.ArrowUpward, null, Modifier.size(16.dp)) } } else null,
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.primary,
+                            selectedLabelColor = Color.White,
+                            selectedLeadingIconColor = Color.White,
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            labelColor = Color.White
+                        )
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     FilterChip(
                         selected = !isAscending,
                         onClick = { viewModel.setDirection(false) },
-                        label = { Text("Descendente", color = Color.White) },
-                        leadingIcon = if (!isAscending) { { Icon(Icons.Default.ArrowDownward, null, Modifier.size(16.dp)) } } else null
+                        label = { Text("Descendente") },
+                        leadingIcon = if (!isAscending) { { Icon(Icons.Default.ArrowDownward, null, Modifier.size(16.dp)) } } else null,
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.primary,
+                            selectedLabelColor = Color.White,
+                            selectedLeadingIconColor = Color.White,
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            labelColor = Color.White
+                        )
                     )
                 }
 
@@ -828,13 +842,25 @@ fun EditRoutePointsScreen(viewModel: MainViewModel, routeId: Long, onBack: () ->
                         FilterChip(
                             selected = type == PointType.STATION, 
                             onClick = { type = PointType.STATION }, 
-                            label = { Text("Estación", color = Color.White) }
+                            label = { Text("Estación") },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                selectedLabelColor = Color.White,
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                labelColor = Color.White
+                            )
                         )
                         Spacer(Modifier.width(8.dp))
                         FilterChip(
                             selected = type == PointType.LIMITATION, 
                             onClick = { type = PointType.LIMITATION }, 
-                            label = { Text("Limitación", color = Color.White) }
+                            label = { Text("Limitación") },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                selectedLabelColor = Color.White,
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                labelColor = Color.White
+                            )
                         )
                     }
                     OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Nombre") }, colors = dialogColors)
