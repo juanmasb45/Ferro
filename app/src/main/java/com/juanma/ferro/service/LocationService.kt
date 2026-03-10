@@ -6,7 +6,9 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.location.Location
+import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.google.android.gms.location.*
@@ -62,7 +64,7 @@ class LocationService : Service() {
 
     private fun handleLocationUpdate(location: Location) {
         serviceScope.launch {
-            val activeShift = ferroDao.getActiveWorkShift().first() ?: return@launch
+            val activeShift = ferroDao.getActiveWorkShift().firstOrNull() ?: return@launch
             
             // 1. Calcular y actualizar progreso (distancia y PK)
             var distanceIncrement = 0.0
@@ -77,7 +79,7 @@ class LocationService : Service() {
 
             // 2. Grabar Log de Trayecto (cada 500 metros para no saturar, pero ser precisos)
             if (lastLogLocation == null || location.distanceTo(lastLogLocation!!) >= 500) {
-                val updatedShift = ferroDao.getActiveWorkShift().first()
+                val updatedShift = ferroDao.getActiveWorkShift().firstOrNull()
                 ferroDao.insertTrackLog(
                     TrackLogEntity(
                         shiftId = activeShift.id,
@@ -93,7 +95,7 @@ class LocationService : Service() {
 
             // 3. Detección automática de Estaciones/PDIs por proximidad GPS
             activeShift.routeId?.let { routeId ->
-                val points = ferroDao.getPointsForRoute(routeId).first()
+                val points = ferroDao.getPointsForRoute(routeId).firstOrNull() ?: emptyList()
                 points.forEach { point ->
                     if (point.id !in visitedPointIds && point.latitude != 0.0) {
                         val pointLoc = Location("").apply {
@@ -122,7 +124,11 @@ class LocationService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, createNotification())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, createNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+        } else {
+            startForeground(NOTIFICATION_ID, createNotification())
+        }
         requestLocationUpdates()
         return START_STICKY
     }
@@ -143,6 +149,7 @@ class LocationService : Service() {
             .setContentText("Registrando trayecto y kilómetros...")
             .setSmallIcon(android.R.drawable.ic_menu_mylocation)
             .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }
 

@@ -1,6 +1,7 @@
 package com.juanma.ferro
 
 import android.Manifest
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -51,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -64,6 +66,7 @@ import com.juanma.ferro.ui.theme.FerroTheme
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.io.File
 import java.text.SimpleDateFormat
 import java.time.Instant
 import java.time.ZoneId
@@ -546,8 +549,8 @@ fun RoutesListScreen(viewModel: MainViewModel, onNavigateToEditPoints: (Long) ->
             TopAppBar(
                 title = { Text("Mis Rutas", color = Color.White) },
                 actions = {
-                    IconButton(onClick = { importLauncher.launch("application/json") }) { Icon(Icons.Default.FileUpload, "Importar", tint = Color.White) }
-                    IconButton(onClick = { exportLauncher.launch("respaldo_rutas_ferro.json") }) { Icon(Icons.Default.FileDownload, "Exportar", tint = Color.White) }
+                    IconButton(onClick = { importLauncher.launch("application/json") }) { Icon(Icons.Default.UploadFile, "Importar", tint = Color.White) }
+                    IconButton(onClick = { exportLauncher.launch("respaldo_rutas_ferro.json") }) { Icon(Icons.Default.Save, "Exportar", tint = Color.White) }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
             ) 
@@ -563,6 +566,28 @@ fun RoutesListScreen(viewModel: MainViewModel, onNavigateToEditPoints: (Long) ->
                     supportingContent = { Text("Tren: ${route.trainNumber} | Máx: ${route.maxSpeed} km/h") },
                     trailingContent = {
                         Row {
+                            IconButton(onClick = {
+                                scope.launch {
+                                    val json = viewModel.getSingleRouteExportJson(route)
+                                    val fileName = "ruta_${route.name.replace(" ", "_")}.json"
+                                    val file = File(context.cacheDir, fileName)
+                                    file.writeText(json)
+                                    
+                                    val uri = FileProvider.getUriForFile(
+                                        context,
+                                        "${context.packageName}.fileprovider",
+                                        file
+                                    )
+                                    
+                                    val intent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "application/json"
+                                        putExtra(Intent.EXTRA_STREAM, uri)
+                                        clipData = ClipData.newRawUri("Ruta Ferro", uri)
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    context.startActivity(Intent.createChooser(intent, "Compartir Ruta"))
+                                }
+                            }) { Icon(Icons.Default.Share, "Compartir", tint = MaterialTheme.colorScheme.primary) }
                             IconButton(onClick = { viewModel.invertRoute(route) }) { Icon(Icons.AutoMirrored.Filled.CompareArrows, "Invertir") }
                             IconButton(onClick = { viewModel.cloneRoute(route) }) { Icon(Icons.Default.CopyAll, "Clonar") }
                             IconButton(onClick = { routeToEdit = route }) { Icon(Icons.Default.Edit, "Editar", tint = MaterialTheme.colorScheme.primary) }

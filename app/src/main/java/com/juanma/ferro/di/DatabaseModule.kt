@@ -23,7 +23,8 @@ object DatabaseModule {
             FerroDatabase::class.java,
             "ferro_db"
         )
-        .addMigrations(FerroDatabase.MIGRATION_9_10)
+        .addMigrations(FerroDatabase.MIGRATION_9_10, FerroDatabase.MIGRATION_10_11)
+        .fallbackToDestructiveMigration()
         .build()
     }
 

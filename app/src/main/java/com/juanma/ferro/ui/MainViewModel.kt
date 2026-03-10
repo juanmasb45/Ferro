@@ -416,6 +416,11 @@ class MainViewModel @Inject constructor(
         return Json.encodeToString(exportList)
     }
 
+    suspend fun getSingleRouteExportJson(route: RouteEntity): String {
+        val points = ferroDao.getPointsForRoute(route.id).first()
+        return Json.encodeToString(RouteExportContainer(route, points))
+    }
+
     fun importRoutesFromJson(json: String) {
         viewModelScope.launch {
             try {
